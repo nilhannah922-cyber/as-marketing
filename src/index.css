@@ -1,0 +1,228 @@
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  /* Responsive layout foundation: mobile is the default tier. */
+  --app-content-max-width: 480px;
+
+  --color-bg: #F7F8F5;
+  --color-surface: #FFFFFF;
+  --color-border: #E4E6DF;
+  --color-ink: #1E2A22;
+  --color-ink-soft: #5B685E;
+  --color-teal: #0F6E56;
+  --color-teal-dark: #085041;
+  --color-amber: #BA7517;
+  --color-amber-bg: #FAEEDA;
+  --color-danger: #993C1D;
+  --color-danger-bg: #FAECE7;
+
+  --font-display: 'Sora', sans-serif;
+  --font-body: 'Inter', sans-serif;
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.12);
+  
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+}
+
+/* Tablet: 641px-1024px */
+@media (min-width: 641px) and (max-width: 1024px) {
+  :root {
+    --app-content-max-width: 900px;
+  }
+}
+
+/* Desktop: 1025px and above */
+@media (min-width: 1025px) {
+  :root {
+    --app-content-max-width: 1200px;
+  }
+}
+
+[data-theme="dark"] {
+  --color-bg: #121412;
+  --color-surface: #1C1F1B;
+  --color-border: #2E332D;
+  --color-ink: #E2E6E1;
+  --color-ink-soft: #8A948C;
+  --color-teal: #199E7D;
+  --color-teal-dark: #128266;
+  --color-amber: #D18C28;
+  --color-amber-bg: #2C2314;
+  --color-danger: #C25132;
+  --color-danger-bg: #2E1813;
+  
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* Base resets */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+input, select, textarea, button {
+  font-family: var(--font-body);
+  color: inherit;
+  font-size: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--color-teal);
+  outline-offset: -1px;
+}
+
+::placeholder {
+  color: var(--color-ink-soft);
+  opacity: 0.6;
+}
+
+/* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Custom Scrollbar for modern look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-soft);
+}
+
+/* Utility Animations */
+.animate-fade-in {
+  animation: fadeIn 0.25s ease-out forwards;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Hide default scanner overlay focus style */
+#reader__scan_region video {
+  object-fit: cover !important;
+  border-radius: var(--radius-md);
+}
+
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+  font-size: 12.5px;
+}
+
+.report-table th,
+.report-table td {
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.report-table th {
+  background: var(--color-bg);
+  color: var(--color-ink-soft);
+  font-weight: 600;
+}
+
+@media print {
+  .stock-print-hide-movement {
+    display: none !important;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .reports-print-area,
+  .reports-print-area * {
+    visibility: visible !important;
+  }
+
+  .reports-print-area {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 12px !important;
+    color: #111 !important;
+    background: #fff !important;
+  }
+
+  .report-table {
+    min-width: 0;
+    font-size: 9px;
+  }
+
+  .report-table th,
+  .report-table td {
+    padding: 5px 4px;
+    white-space: normal;
+    color: #111 !important;
+    border-color: #ccc !important;
+  }
+
+  @page {
+    size: landscape;
+    margin: 10mm;
+  }
+}

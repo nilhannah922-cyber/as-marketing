@@ -578,12 +578,6 @@ function LoginScreen({ loginForm, setLoginForm, onSubmit, error, onBiometricLogi
         <h1 style={S.loginTitle}>Stock &amp; Order</h1>
         <p style={S.loginSub}>Sign in to manage your inventory and orders.</p>
         
-        {isMock && (
-          <div style={S.mockBanner}>
-            Running in Local Mock Mode. DB changes persist locally.
-          </div>
-        )}
-
         <form onSubmit={onSubmit} style={{ width: "100%" }}>
           <label style={S.label}>Username or mobile number</label>
           <input 
@@ -649,9 +643,7 @@ function Header({ session, cartCount, pendingPackCount, screen, setScreen, logou
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {isMock ? (
-              <span style={S.mockIndicator}>Mock DB</span>
-            ) : (
+            {!isMock && (
               <span style={S.liveIndicator}>Supabase Live</span>
             )}
             <button style={S.logoutBtn} onClick={logout}>Log out</button>

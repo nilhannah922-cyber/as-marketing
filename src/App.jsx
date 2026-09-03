@@ -4,6 +4,7 @@ import Swal from "sweetalert2";
 import "sweetalert2/dist/sweetalert2.min.css";
 import { db } from "./db";
 import { isMock } from "./supabaseClient";
+import { PERMISSIONS, hasPermission } from "./permissions";
 
 export default function App() {
   const [booting, setBooting] = useState(true);
@@ -66,6 +67,13 @@ export default function App() {
     Swal.fire({ toast: true, position: 'bottom', icon, title: text, showConfirmButton: false, timer: icon === 'error' ? 4500 : 2800, timerProgressBar: true });
   }, []);
 
+  const isSuperAdmin = !!session && session.role_name === 'Super admin' && (session.is_system_role || session.role === 'superadmin');
+  const navigate = target => {
+    if (target !== 'permissions') { setScreen(target); return; }
+    if (!isSuperAdmin) { showToast('Only Super admin can access Permissions.', 'error'); setScreen('home'); return; }
+    setScreen('permissions');
+  };
+
   const setConfirmDialog = useCallback((dialog) => {
     if (!dialog) { Swal.close(); return; }
     const destructive = /delete|remove|cancel|restore database|permanent/i.test(`${dialog.title} ${dialog.message}`);
@@ -115,9 +123,15 @@ export default function App() {
       const cachedSession = localStorage.getItem("so:session");
       if (cachedSession) {
         try {
-          const u = JSON.parse(cachedSession);
-          setSession(u);
-          setScreen("home");
+          const cached = JSON.parse(cachedSession);
+          const u = await db.getCurrentProfile(cached.id);
+          if (u) {
+            setSession(u);
+            localStorage.setItem("so:session", JSON.stringify(u));
+            setScreen("home");
+          } else {
+            localStorage.removeItem("so:session");
+          }
         } catch {
           localStorage.removeItem("so:session");
         }
@@ -396,7 +410,6 @@ export default function App() {
           onSubmit={handleLogin} 
           error={loginError} 
           onBiometricLogin={handleBiometricLogin}
-          showToast={showToast}
         />
       )}
 
@@ -407,12 +420,13 @@ export default function App() {
             cartCount={cartCount} 
             pendingPackCount={orders.filter(order => (order.pack_status || "pending") === "pending").length}
             screen={screen} 
-            setScreen={setScreen} 
+            setScreen={navigate}
             logout={logout} 
           />
 
           {screen === "home" && (
             <HomeScreen
+              session={session}
               stats={stats}
               categories={filteredCategories}
               products={products}
@@ -507,6 +521,7 @@ export default function App() {
 
           {screen === "reports" && (
             <ReportsScreen
+              session={session}
               orders={orders}
               categories={categories}
               products={products}
@@ -549,6 +564,14 @@ export default function App() {
               onBack={() => setScreen("home")}
             />
           )}
+
+          {screen === "permissions" && isSuperAdmin && (
+            <PermissionsScreen session={session} showToast={showToast} setConfirmDialog={setConfirmDialog} onBack={() => setScreen('home')} />
+          )}
+
+          {screen === "permissions" && !isSuperAdmin && (
+            <main style={S.main}><button style={S.backBtn} onClick={() => setScreen('home')}>← Back to home</button><p style={S.errorText}>Access denied. Only the protected Super admin role can access Permissions.</p></main>
+          )}
         </>
       )}
 
@@ -567,7 +590,7 @@ export default function App() {
 
 // SCREEN COMPONENTS
 
-function LoginScreen({ loginForm, setLoginForm, onSubmit, error, onBiometricLogin, showToast }) {
+function LoginScreen({ loginForm, setLoginForm, onSubmit, error, onBiometricLogin }) {
   const isBiometricAvailable = db.isWebAuthnSupported();
   const isRegisteredOnDevice = !!localStorage.getItem('so:registered_credential_id');
 
@@ -584,7 +607,7 @@ function LoginScreen({ loginForm, setLoginForm, onSubmit, error, onBiometricLogi
             style={S.input} 
             value={loginForm.username} 
             onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} 
-            placeholder="e.g. Nihlan922" 
+            placeholder="Email, username, or mobile number"
             autoComplete="username" 
           />
           <label style={S.label}>Password</label>
@@ -607,14 +630,16 @@ function LoginScreen({ loginForm, setLoginForm, onSubmit, error, onBiometricLogi
         )}
 
         {(!isRegisteredOnDevice || !isBiometricAvailable) && (
-          <button style={{ ...S.fingerprintBtn, opacity: 0.6, cursor: "not-allowed" }} onClick={() => {
-            showToast("Register biometrics from Settings after signing in with your password.");
-          }}>
+          <button type="button" disabled style={{ ...S.fingerprintBtn, opacity: 0.6, cursor: "not-allowed" }}>
             <span style={{ fontSize: 18 }}>⚷</span> Biometrics not configured on device
           </button>
         )}
         
-        <p style={S.demoNote}>Demo Admin: <strong>Nihlan922</strong> / <strong>NIH922nih##</strong></p>
+        {(!isRegisteredOnDevice || !isBiometricAvailable) && (
+          <p style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 8, textAlign: "center", lineHeight: 1.4 }}>
+            Fingerprint login is not set up on this device yet. Sign in with your password, then enable it in Settings. WebAuthn requires HTTPS or localhost.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -628,7 +653,17 @@ function Header({ session, cartCount, pendingPackCount, screen, setScreen, logou
     { key: "account", label: "Summary", icon: "▥" },
     { key: "reports", label: "Reports", icon: "📈" },
     { key: "manage", label: "Manage", icon: "🔧" },
+    { key: "permissions", label: "Permissions", icon: "🔐" },
   ];
+  const navPermission = {
+    cart: ['create_orders'],
+    orders: ['view_all_orders', 'create_orders'],
+    account: ['manage_customers', 'record_payments'],
+    reports: ['view_reports'],
+    manage: ['manage_products', 'manage_categories', 'manage_customers', 'manage_stock', 'manage_suppliers', 'restore_deleted_records'],
+  };
+  const isSuperAdmin = session.role_name === 'Super admin' && (session.is_system_role || session.role === 'superadmin');
+  const visibleNavItems = navItems.filter(item => item.key === 'permissions' ? isSuperAdmin : !navPermission[item.key] || navPermission[item.key].some(key => hasPermission(session, key)));
   return (
     <header style={S.header}>
       <div style={S.headerInner}>
@@ -638,7 +673,7 @@ function Header({ session, cartCount, pendingPackCount, screen, setScreen, logou
             <div>
               <div style={S.headerTitle}>AS Marketing</div>
               <div style={S.headerUser}>
-                {session.name || session.username} · {session.role === "superadmin" ? "Super admin" : "User"}
+                {session.name || session.username} · {session.role_name || (session.role === "superadmin" ? "Super admin" : "User")}
               </div>
             </div>
           </div>
@@ -650,7 +685,7 @@ function Header({ session, cartCount, pendingPackCount, screen, setScreen, logou
           </div>
         </div>
         <nav style={S.headerNav}>
-          {navItems.map(item => (
+          {visibleNavItems.map(item => (
             <button 
               key={item.key} 
               style={{ ...S.navBtn, ...(screen === item.key ? S.navBtnActive : {}) }} 
@@ -667,7 +702,7 @@ function Header({ session, cartCount, pendingPackCount, screen, setScreen, logou
   );
 }
 
-function HomeScreen({ stats, categories, catSearch, setCatSearch, catSort, setCatSort, onOpenCategory, onMakeOrder, products, fmt }) {
+function HomeScreen({ session, stats, categories, catSearch, setCatSearch, catSort, setCatSort, onOpenCategory, onMakeOrder, products, fmt }) {
   const [exportMode, setExportMode] = useState(false);
   const [selectedCategories, setSelectedCategories] = useState([]);
   const stockMessage = selectedCategories.map(id => {
@@ -721,10 +756,10 @@ function HomeScreen({ stats, categories, catSearch, setCatSearch, catSort, setCa
         ))}
       </div>
 
-      <button type="button" style={{ ...S.primaryBtn, margin: "0 0 18px" }} onClick={onMakeOrder}>Make an order</button>
+      {hasPermission(session, 'create_orders') && <button type="button" style={{ ...S.primaryBtn, margin: "0 0 18px" }} onClick={onMakeOrder}>Make an order</button>}
       <div style={S.sectionHeadRow}>
         <h2 style={S.sectionHead}>Categories</h2>
-        <button style={{ ...S.ghostBtn, margin: 0, width: "auto" }} onClick={() => { setExportMode(x => !x); setSelectedCategories([]); }}>Export stock</button>
+        {hasPermission(session, 'export_reports') && <button style={{ ...S.ghostBtn, margin: 0, width: "auto" }} onClick={() => { setExportMode(x => !x); setSelectedCategories([]); }}>Export stock</button>}
       </div>
       {exportMode && (
         <div style={{ ...S.profileCard, marginBottom: 14 }}>
@@ -1442,7 +1477,7 @@ function OrderDetailScreen({ order, onBack, onRefresh, session, fmt, showToast, 
         <div style={S.invoiceLabel}>Packing / Fulfillment</div>
         <div style={{ ...S.invoiceValue, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <PackStatusBadge status={packStatus} />
-          {packActions[packStatus] && <button style={{ ...S.primaryBtn, margin: 0, width: "auto", padding: "8px 12px" }} onClick={handleAdvancePackStatus}>{packActions[packStatus]}</button>}
+          {hasPermission(session, 'advance_order_status') && packActions[packStatus] && <button style={{ ...S.primaryBtn, margin: 0, width: "auto", padding: "8px 12px" }} onClick={handleAdvancePackStatus}>{packActions[packStatus]}</button>}
           {packStatus === "received" && <span style={{ color: "var(--color-teal)", fontWeight: 600 }}>Final</span>}
         </div>
         {order.transport_name && <><div style={S.invoiceLabel}>Transport / Courier</div><div style={S.invoiceValue}>{order.transport_name}</div></>}
@@ -1463,7 +1498,7 @@ function OrderDetailScreen({ order, onBack, onRefresh, session, fmt, showToast, 
               <div style={S.cartUnitPrice}>{fmt(item.unit_price)} each</div>
               {Number(item.returned_quantity || 0) > 0 && <div style={{ ...S.cartUnitPrice, color: 'var(--color-danger)', fontWeight: 600 }}>Returned: {item.returned_quantity}</div>}
             </div>
-            {!order.has_returns && <div style={S.qtyRow}>
+            {hasPermission(session, 'edit_orders') && !order.has_returns && <div style={S.qtyRow}>
               <button style={S.qtyBtnSm} onClick={() => handleQtyChangeWrapper(item.product_id, item.quantity, item.quantity - 1, item.unit_price, item.name)}>−</button>
               <input
                 aria-label="Quantity"
@@ -1483,7 +1518,7 @@ function OrderDetailScreen({ order, onBack, onRefresh, session, fmt, showToast, 
               <button style={S.qtyBtnSm} onClick={() => handleQtyChangeWrapper(item.product_id, item.quantity, item.quantity + 1, item.unit_price, item.name)}>+</button>
             </div>}
             <div style={S.cartLineTotal}>{fmt(item.unit_price * item.quantity)}</div>
-            {!order.has_returns && <button style={S.removeBtn} onClick={() => handleRemoveItem(item.product_id, item.quantity, item.unit_price, item.name)}>✕</button>}
+            {hasPermission(session, 'edit_orders') && !order.has_returns && <button style={S.removeBtn} onClick={() => handleRemoveItem(item.product_id, item.quantity, item.unit_price, item.name)}>✕</button>}
           </div>
         ))}
         {(!order.items || order.items.length === 0) && <p style={S.emptyText}>No items remaining in this order.</p>}
@@ -1510,12 +1545,12 @@ function OrderDetailScreen({ order, onBack, onRefresh, session, fmt, showToast, 
 
       <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
         <button style={{ ...S.ghostBtn, margin: 0 }} onClick={handlePrintInvoice}>{packStatus === 'received' ? 'Download / Print invoice' : 'Print bill'}</button>
-        <button style={{ ...S.ghostBtn, margin: 0, color: 'var(--color-danger)' }} onClick={handleReturn}>Return</button>
+        {hasPermission(session, 'process_returns') && <button style={{ ...S.ghostBtn, margin: 0, color: 'var(--color-danger)' }} onClick={handleReturn}>Return</button>}
         <button style={{ ...S.ghostBtn, margin: 0 }} onClick={handleCopyOrder}>Copy to clipboard</button>
-        <button style={S.dangerGhostBtn} onClick={handleDeleteOrder}>
+        {hasPermission(session, 'delete_orders') && <button style={S.dangerGhostBtn} onClick={handleDeleteOrder}>
           🗑️ Recycle Bin
-        </button>
-        {outstanding > 0 && (
+        </button>}
+        {hasPermission(session, 'record_payments') && outstanding > 0 && (
           <button style={{ ...S.primaryBtn, margin: 0, flex: 1 }} onClick={() => setShowPaymentSheet(true)}>
             💵 Record Payment
           </button>
@@ -1556,7 +1591,7 @@ function OrderDetailScreen({ order, onBack, onRefresh, session, fmt, showToast, 
   );
 }
 
-function ReportsScreen({ orders, categories, products, customers, stockHistory, stockBatches, fmt, currency, onBack, showToast }) {
+function ReportsScreen({ session, orders, categories, products, customers, stockHistory, stockBatches, fmt, currency, onBack, showToast }) {
   const [reportType, setReportType] = useState("sales");
   const [periodType, setPeriodType] = useState("daily");
   const [dailyDate, setDailyDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -1828,10 +1863,10 @@ function ReportsScreen({ orders, categories, products, customers, stockHistory, 
               </div>
             </div>
           )}
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+          {hasPermission(session, 'export_reports') && <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
             <button style={{ ...S.primaryBtn, margin: 0, width: "auto" }} disabled={reportType === 'stock' && !someStockSelected} onClick={exportPdf}>Export PDF</button>
             <button style={{ ...S.ghostBtn, margin: 0, width: "auto" }} disabled={reportType === 'stock' && !someStockSelected} onClick={exportExcel}>Export Excel</button>
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -1917,7 +1952,7 @@ function SettingsScreen({ session, onRegisterBiometric, onBack, theme, setTheme,
           {session.name ? session.name.slice(0, 2).toUpperCase() : session.username.slice(0, 2).toUpperCase()}
         </div>
         <h3 style={S.profileName}>{session.name || "System User"}</h3>
-        <p style={S.profileDetail}>Role: <strong>{session.role === 'superadmin' ? 'Super Admin' : 'Staff'}</strong></p>
+        <p style={S.profileDetail}>Role: <strong>{session.role_name || (session.role === 'superadmin' ? 'Super Admin' : 'User')}</strong></p>
         <p style={S.profileDetail}>Email: <strong>{session.email || 'N/A'}</strong></p>
         <p style={S.profileDetail}>Mobile: <strong>{session.mobile || 'N/A'}</strong></p>
 
@@ -1948,7 +1983,7 @@ function SettingsScreen({ session, onRegisterBiometric, onBack, theme, setTheme,
         </div>
 
         {/* Database backup & restore */}
-        <div style={{ borderTop: "1px solid var(--color-border)", marginTop: 20, paddingTop: 16 }}>
+        {hasPermission(session, 'backup_restore') && <div style={{ borderTop: "1px solid var(--color-border)", marginTop: 20, paddingTop: 16 }}>
           <h4 style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 15, marginBottom: 8 }}>Backup &amp; Restore</h4>
           <p style={{ color: "var(--color-ink-soft)", fontSize: 12.5, marginBottom: 12, lineHeight: 1.4 }}>
             Export the current tables as a JSON file, or restore data from an existing backup file.
@@ -1962,7 +1997,7 @@ function SettingsScreen({ session, onRegisterBiometric, onBack, theme, setTheme,
               <input type="file" accept=".json" onChange={handleRestore} style={{ display: "none" }} />
             </label>
           </div>
-        </div>
+        </div>}
 
         {/* Device Biometrics setting */}
         <div style={{ borderTop: "1px solid var(--color-border)", marginTop: 20, paddingTop: 16 }}>
@@ -2332,7 +2367,7 @@ function AccountScreen({ session, customers, orders, loadData, showToast, fmt, o
               <span>{c.company || "No company info"}</span>
               <span>{c.mobile}</span>
             </div>
-            {Number(c.balance || 0) > 0 && <button style={{ ...S.primaryBtn, width: 'auto', margin: '10px 0 0', padding: '7px 11px' }} onClick={event => { event.stopPropagation(); handleRecordCustomerPayment(c); }}>Record payment</button>}
+            {hasPermission(session, 'record_payments') && Number(c.balance || 0) > 0 && <button style={{ ...S.primaryBtn, width: 'auto', margin: '10px 0 0', padding: '7px 11px' }} onClick={event => { event.stopPropagation(); handleRecordCustomerPayment(c); }}>Record payment</button>}
           </div>
         ))}
         {filteredCusts.length === 0 && <p style={S.emptyText}>No customer accounts match your search.</p>}
@@ -2341,51 +2376,46 @@ function AccountScreen({ session, customers, orders, loadData, showToast, fmt, o
   );
 }
 
-function ManageScreen({ session, categories, products, customers, loadData, showToast, setConfirmDialog, fmt, onBack }) {
-  const [subTab, setSubTab] = useState("products");
+function PermissionsScreen({ session, showToast, setConfirmDialog, onBack }) {
+  const [tab, setTab] = useState('staff');
+  const [staff, setStaff] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [staffSheet, setStaffSheet] = useState(null);
+  const [roleSheet, setRoleSheet] = useState(null);
 
-  const [isAdminVerified, setIsAdminVerified] = useState(false);
-  const [showReauthModal, setShowReauthModal] = useState(false);
-  const [pendingTab, setPendingTab] = useState(null);
-  const [reauthPassword, setReauthPassword] = useState("");
-  const [reauthError, setReauthError] = useState("");
-  const [reauthSubmitting, setReauthSubmitting] = useState(false);
-  
+  const loadStaff = useCallback(async () => setStaff(await db.fetchStaffUsers()), []);
+  const loadRoles = useCallback(async () => setRoles(await db.fetchRoles()), []);
+  const loadLogs = useCallback(async () => setLogs(await db.fetchAuditLogs()), []);
+  useEffect(() => { setLoading(true); Promise.all([loadStaff(), loadRoles(), loadLogs()]).catch(error => showToast(error.message)).finally(() => setLoading(false)); }, [loadStaff, loadRoles, loadLogs, showToast]);
+
+  const deleteStaff = user => setConfirmDialog({ title: 'Delete staff user?', message: `Permanently delete ${user.name || user.email}?`, onConfirm: async () => { await db.deleteStaffUser(user.id); await loadStaff(); await loadRoles(); setConfirmDialog(null); } });
+  const deleteRole = role => {
+    if (role.staff?.length) { showToast(`Reassign these staff first: ${role.staff.map(user => user.name || user.email).join(', ')}`, 'error'); return; }
+    setConfirmDialog({ title: 'Delete role?', message: `Permanently delete ${role.name}?`, onConfirm: async () => { await db.deleteRole(role); await loadRoles(); setConfirmDialog(null); } });
+  };
+
+  return <main style={S.main} className="animate-fade-in">
+    <button style={S.backBtn} onClick={onBack}>← Back to home</button><h2 style={S.sectionHead}>Permissions</h2>
+    <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>{[['staff','Staff users'],['roles','Roles'],['logs','Audit logs']].map(([key,label]) => <button key={key} style={{ ...S.pillFilter, ...(tab === key ? S.pillFilterActive : {}) }} onClick={() => setTab(key)}>{label}</button>)}</div>
+    {loading ? <p style={S.emptyText}>Loading permissions workspace...</p> : <>
+      {tab === 'staff' && <section><div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}><button style={{ ...S.primaryBtn, margin: 0, width: 'auto' }} onClick={() => setStaffSheet({})}>Register new staff</button></div><div style={{ display: 'grid', gap: 10 }}>{staff.map(user => <div key={user.id} style={{ ...S.orderCard, cursor: 'default' }}><h4>{user.name || 'Unnamed user'}</h4><p style={{ fontSize: 12, color: 'var(--color-ink-soft)', marginTop: 3 }}>{user.role_name || 'Unassigned'} · {user.email} · {user.mobile || 'No mobile'}</p><div style={{ display: 'flex', gap: 6, marginTop: 8 }}><button style={{ ...S.ghostBtn, margin: 0, padding: '5px 10px' }} onClick={() => setStaffSheet(user)}>Edit</button>{user.id !== session.id && <button style={{ ...S.ghostBtn, margin: 0, padding: '5px 10px', color: 'var(--color-danger)' }} onClick={() => deleteStaff(user)}>Delete</button>}</div></div>)}</div></section>}
+      {tab === 'roles' && <section><div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}><button style={{ ...S.primaryBtn, margin: 0, width: 'auto' }} onClick={() => setRoleSheet({})}>Create role</button></div><div style={{ display: 'grid', gap: 10 }}>{roles.map(role => <div key={role.id} style={{ ...S.orderCard, cursor: 'default' }}><div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}><div><h4>{role.name} {role.is_system_role && '(System role)'}</h4><p style={{ fontSize: 12, color: 'var(--color-ink-soft)', marginTop: 3 }}>{role.description || 'No description'} · {role.staff?.length || 0} staff assigned</p></div>{!role.is_system_role && <div style={{ display: 'flex', gap: 6 }}><button style={{ ...S.ghostBtn, margin: 0, padding: '5px 10px' }} onClick={() => setRoleSheet(role)}>Edit</button><button style={{ ...S.ghostBtn, margin: 0, padding: '5px 10px', color: 'var(--color-danger)' }} onClick={() => deleteRole(role)}>Delete</button></div>}</div></div>)}</div></section>}
+      {tab === 'logs' && <section><div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}><button style={{ ...S.ghostBtn, margin: 0, width: 'auto' }} onClick={loadLogs}>Refresh</button></div><div style={{ display: 'grid', gap: 8 }}>{logs.map(log => <div key={log.id} style={{ borderBottom: '1px solid var(--color-border)', paddingBottom: 8, fontSize: 12.5 }}><div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--color-ink-soft)', fontSize: 11 }}><span>{new Date(log.created_at).toLocaleString('en-LK')}</span><strong>{log.userName}</strong></div><div>{log.action}</div></div>)}</div></section>}
+    </>}
+    {staffSheet && <StaffFormSheet session={session} roles={roles} staff={staffSheet.id ? staffSheet : null} onClose={() => setStaffSheet(null)} onSaved={async () => { setStaffSheet(null); await loadStaff(); await loadRoles(); await loadLogs(); }} showToast={showToast} />}
+    {roleSheet && <RoleFormSheet role={roleSheet.id ? roleSheet : null} session={session} onClose={() => setRoleSheet(null)} onSaved={async () => { setRoleSheet(null); await loadRoles(); }} showToast={showToast} />}
+  </main>;
+}
+
+function ManageScreen({ session, categories, products, customers, loadData, showToast, setConfirmDialog, fmt, onBack }) {
+  const can = key => hasPermission(session, key);
+  const [subTab, setSubTab] = useState(() => can('manage_products') ? 'products' : can('manage_stock') ? 'bulk_stock' : can('manage_categories') ? 'categories' : can('manage_customers') ? 'customers' : can('manage_suppliers') ? 'suppliers' : 'recycle');
+
   const [showScanModal, setShowScanModal] = useState(null); // { mode: 'search' | 'form', callback: Function }
 
-  const handleTabClick = (tabKey) => {
-    if ((tabKey === "users" || tabKey === "logs") && !isAdminVerified) {
-      setPendingTab(tabKey);
-      setShowReauthModal(true);
-      setReauthPassword("");
-      setReauthError("");
-    } else {
-      setSubTab(tabKey);
-    }
-  };
-
-  const handleReauthSubmit = async (e) => {
-    e.preventDefault();
-    if (!reauthPassword) {
-      setReauthError("Password cannot be empty.");
-      return;
-    }
-    setReauthSubmitting(true);
-    setReauthError("");
-    try {
-      await db.reverifyPassword(session.email || session.username, reauthPassword);
-      setIsAdminVerified(true);
-      setShowReauthModal(false);
-      setReauthPassword("");
-      if (pendingTab) {
-        setSubTab(pendingTab);
-      }
-    } catch (err) {
-      setReauthError(err.message || "Re-authentication failed.");
-    } finally {
-      setReauthSubmitting(false);
-    }
-  };
+  const handleTabClick = setSubTab;
 
   const handleScanSuccess = (decodedText) => {
     if (showScanModal?.mode === "search") {
@@ -2410,8 +2440,6 @@ function ManageScreen({ session, categories, products, customers, loadData, show
   const [showCustSheet, setShowCustSheet] = useState(false);
   const [editingCust, setEditingCust] = useState(null);
 
-  const [showStaffSheet, setShowStaffSheet] = useState(false);
-
   // Search filter states
   const [prodSearch, setProdSearch] = useState("");
   const [catSearch, setCatSearch] = useState("");
@@ -2421,14 +2449,6 @@ function ManageScreen({ session, categories, products, customers, loadData, show
   const [deletedData, setDeletedData] = useState({ orders: [], categories: [], products: [], customers: [] });
   const [deletedTab, setDeletedTab] = useState("orders");
   const [loadingDeleted, setLoadingDeleted] = useState(false);
-
-  // Users state
-  const [staffUsers, setStaffUsers] = useState([]);
-  const [loadingStaff, setLoadingStaff] = useState(false);
-
-  // Audit logs state
-  const [auditLogs, setAuditLogs] = useState([]);
-  const [loadingLogs, setLoadingLogs] = useState(false);
 
   const loadDeleted = useCallback(async () => {
     setLoadingDeleted(true);
@@ -2442,35 +2462,9 @@ function ManageScreen({ session, categories, products, customers, loadData, show
     }
   }, [showToast]);
 
-  const loadStaff = useCallback(async () => {
-    setLoadingStaff(true);
-    try {
-      const data = await db.fetchStaffUsers();
-      setStaffUsers(data);
-    } catch (err) {
-      showToast("Staff retrieval failed: " + err.message);
-    } finally {
-      setLoadingStaff(false);
-    }
-  }, [showToast]);
-
-  const loadLogs = useCallback(async () => {
-    setLoadingLogs(true);
-    try {
-      const data = await db.fetchAuditLogs();
-      setAuditLogs(data);
-    } catch (err) {
-      showToast("Logs retrieval failed: " + err.message);
-    } finally {
-      setLoadingLogs(false);
-    }
-  }, [showToast]);
-
   useEffect(() => {
     if (subTab === "recycle") loadDeleted();
-    else if (subTab === "users") loadStaff();
-    else if (subTab === "logs") loadLogs();
-  }, [subTab, loadDeleted, loadStaff, loadLogs]);
+  }, [subTab, loadDeleted]);
 
   // Delete Handlers
   const handleDeleteCat = (cat) => {
@@ -2585,19 +2579,15 @@ function ManageScreen({ session, categories, products, customers, loadData, show
 
   // Tab rendering
   const manageTabs = [
-    { key: "products", label: "Products" },
-    { key: "bulk_stock", label: "Bulk Stock" },
-    { key: "stock_entry", label: "Stock Entry" },
-    { key: "categories", label: "Categories" },
-    { key: "customers", label: "Customers" },
-    { key: "suppliers", label: "Suppliers" },
-    { key: "purchase_orders", label: "Purchase Orders" },
-    { key: "recycle", label: "Recycle Bin" },
-  ];
-  if (session.role === 'superadmin') {
-    manageTabs.push({ key: "users", label: "Staff Users" });
-    manageTabs.push({ key: "logs", label: "Audit Logs" });
-  }
+    can('manage_products') && { key: "products", label: "Products" },
+    can('manage_stock') && { key: "bulk_stock", label: "Bulk Stock" },
+    can('manage_stock') && { key: "stock_entry", label: "Stock Entry" },
+    can('manage_categories') && { key: "categories", label: "Categories" },
+    can('manage_customers') && { key: "customers", label: "Customers" },
+    can('manage_suppliers') && { key: "suppliers", label: "Suppliers" },
+    can('manage_suppliers') && { key: "purchase_orders", label: "Purchase Orders" },
+    can('restore_deleted_records') && { key: "recycle", label: "Recycle Bin" },
+  ].filter(Boolean);
 
   return (
     <main style={S.main} className="animate-fade-in">
@@ -2838,7 +2828,7 @@ function ManageScreen({ session, categories, products, customers, loadData, show
                     >
                       ↩️ Restore Order
                     </button>
-                    {session.role === "superadmin" && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("order", o.id, `ORD-${String(o.order_number).padStart(6, "0")}`)}>Delete forever</button>}
+                    {can('permanently_delete_records') && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("order", o.id, `ORD-${String(o.order_number).padStart(6, "0")}`)}>Delete forever</button>}
                   </div>
                   <div style={S.orderCust}>{o.customerName}</div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--color-ink-soft)", marginTop: 6 }}>
@@ -2861,7 +2851,7 @@ function ManageScreen({ session, categories, products, customers, loadData, show
                     >
                       ↩️ Restore Product
                     </button>
-                    {session.role === "superadmin" && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("product", p.id, p.name)}>Delete forever</button>}
+                    {can('permanently_delete_records') && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("product", p.id, p.name)}>Delete forever</button>}
                   </div>
                 </div>
               ))}
@@ -2878,7 +2868,7 @@ function ManageScreen({ session, categories, products, customers, loadData, show
                     >
                       ↩️ Restore Category
                     </button>
-                    {session.role === "superadmin" && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("category", c.id, c.name)}>Delete forever</button>}
+                    {can('permanently_delete_records') && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("category", c.id, c.name)}>Delete forever</button>}
                   </div>
                 </div>
               ))}
@@ -2896,70 +2886,12 @@ function ManageScreen({ session, categories, products, customers, loadData, show
                     >
                       ↩️ Restore Customer
                     </button>
-                    {session.role === "superadmin" && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("customer", c.id, c.name)}>Delete forever</button>}
+                    {can('permanently_delete_records') && <button style={{ ...S.ghostBtn, margin: 0, padding: "5px 10px", fontSize: 12, color: "var(--color-danger)" }} onClick={() => handlePermanentDelete("customer", c.id, c.name)}>Delete forever</button>}
                   </div>
                 </div>
               ))}
 
               {deletedData[deletedTab]?.length === 0 && <p style={S.emptyText}>No deleted records in this category.</p>}
-            </div>
-          )}
-        </>
-      )}
-
-      {/* STAFF USERS TAB */}
-      {subTab === "users" && (
-        <>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-            <button 
-              style={{ ...S.primaryBtn, margin: 0, width: "auto" }}
-              onClick={() => setShowStaffSheet(true)}
-            >
-              ➕ Register New Staff
-            </button>
-          </div>
-
-          {loadingStaff ? (
-            <p style={S.emptyText}>Loading staff profiles...</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {staffUsers.map(u => (
-                <div key={u.id} style={{ ...S.orderCard, cursor: "default" }}>
-                  <h4 style={{ fontSize: 14.5, fontWeight: 700 }}>{u.name || "Unnamed User"}</h4>
-                  <p style={{ fontSize: 12, color: "var(--color-ink-soft)", marginTop: 2 }}>
-                    Role: <strong>{u.role === 'superadmin' ? 'Super Admin' : 'Staff'}</strong> · Email: {u.email || 'N/A'} · Mobile: {u.mobile || 'N/A'}
-                  </p>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
-      {/* AUDIT LOGS TAB */}
-      {subTab === "logs" && (
-        <>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-soft)" }}>Recorded Actions</span>
-            <button style={{ ...S.linkBtn, color: "var(--color-teal)", fontWeight: 600 }} onClick={loadLogs}>🔄 Refresh Logs</button>
-          </div>
-
-          {loadingLogs ? (
-            <p style={S.emptyText}>Loading logs...</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
-              {auditLogs.map(l => (
-                <div key={l.id} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: 8, fontSize: 12.5 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", color: "var(--color-ink-soft)", fontSize: 11 }}>
-                    <span>{new Date(l.created_at).toLocaleString("en-LK")}</span>
-                    <strong>{l.userName}</strong>
-                  </div>
-                  <div style={{ marginTop: 2, color: "var(--color-ink)", fontWeight: 500 }}>
-                    {l.action}
-                  </div>
-                </div>
-              ))}
-              {auditLogs.length === 0 && <p style={S.emptyText}>No activity logged in the workspace yet.</p>}
             </div>
           )}
         </>
@@ -3025,50 +2957,6 @@ function ManageScreen({ session, categories, products, customers, loadData, show
           }}
           showToast={showToast}
         />
-      )}
-
-      {/* STAFF REGISTRATION SHEET */}
-      {showStaffSheet && (
-        <StaffFormSheet 
-          session={session}
-          onClose={() => setShowStaffSheet(false)}
-          onSaved={async () => {
-            setShowStaffSheet(false);
-            await loadStaff();
-            await loadLogs();
-          }}
-          showToast={showToast}
-        />
-      )}
-
-      {showReauthModal && (
-        <div style={S.sheetOverlay} onClick={() => { setShowReauthModal(false); setPendingTab(null); }} className="animate-fade-in">
-          <div style={S.sheet} onClick={e => e.stopPropagation()} className="animate-slide-up">
-            <div style={S.sheetHandle} />
-            <h3 style={S.sheetTitle}>Superadmin Verification</h3>
-            <p style={S.sheetDesc}>
-              Please verify your password to access staff settings and audit logs.
-            </p>
-            <form onSubmit={handleReauthSubmit} style={{ width: "100%", marginTop: 12 }}>
-              <label style={S.label}>Enter Admin Password</label>
-              <input 
-                style={S.input} 
-                type="password" 
-                value={reauthPassword} 
-                onChange={e => setReauthPassword(e.target.value)} 
-                placeholder="••••••••" 
-                autoFocus 
-              />
-              {reauthError && <p style={S.errorText}>{reauthError}</p>}
-              <button type="submit" style={S.primaryBtn} disabled={reauthSubmitting}>
-                {reauthSubmitting ? "Verifying..." : "Verify & Continue"}
-              </button>
-              <button type="button" style={S.ghostBtn} onClick={() => { setShowReauthModal(false); setPendingTab(null); }}>
-                Cancel
-              </button>
-            </form>
-          </div>
-        </div>
       )}
 
       {showScanModal && (
@@ -3719,24 +3607,25 @@ function CustomerFormSheet({ customer, session, onClose, onSaved, showToast }) {
   );
 }
 
-function StaffFormSheet({ session, onClose, onSaved, showToast }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [mobile, setMobile] = useState("");
+function StaffFormSheet({ session, roles, staff, onClose, onSaved, showToast }) {
+  const [name, setName] = useState(staff?.name || "");
+  const [email, setEmail] = useState(staff?.email || "");
+  const [mobile, setMobile] = useState(staff?.mobile || "");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("user");
+  const [roleId, setRoleId] = useState(staff?.role_id || roles[0]?.id || "");
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!name || !email || !mobile || !password) {
+    if (!name || !email || !mobile || !roleId || (!staff && !password)) {
       showToast("Please fill in all required fields.");
       return;
     }
     setSubmitting(true);
     try {
-      await db.createStaffUser(name, mobile, email, password, role, session.id);
-      showToast(`Staff registered: ${name}`);
+      if (staff) await db.updateStaffUser(staff.id, { name, mobile, email, roleId }, session.id);
+      else await db.createStaffUser(name, mobile, email, password, roleId, session.id);
+      showToast(`Staff ${staff ? 'updated' : 'registered'}: ${name}`);
       onSaved();
     } catch (err) {
       showToast("Registration failed: " + err.message);
@@ -3749,7 +3638,7 @@ function StaffFormSheet({ session, onClose, onSaved, showToast }) {
     <div style={S.sheetOverlay} onClick={onClose} className="animate-fade-in">
       <div style={S.sheet} onClick={e => e.stopPropagation()} className="animate-slide-up">
         <div style={S.sheetHandle} />
-        <h3 style={S.sheetTitle}>Register Staff Profile</h3>
+        <h3 style={S.sheetTitle}>{staff ? 'Edit Staff Profile' : 'Register Staff Profile'}</h3>
         <form onSubmit={handleSubmit} style={{ width: "100%", marginTop: 10 }}>
           <label style={S.label}>Staff Name</label>
           <input style={S.input} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Nadeesha Silva" required />
@@ -3760,23 +3649,44 @@ function StaffFormSheet({ session, onClose, onSaved, showToast }) {
           <label style={S.label}>Mobile Number</label>
           <input style={S.input} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="e.g. 0779876543" required />
 
-          <label style={S.label}>Temporary Password (min 8 chars)</label>
-          <input style={S.input} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" required />
+          {!staff && <><label style={S.label}>Temporary Password (min 8 chars)</label><input style={S.input} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" required /></>}
 
           <label style={S.label}>System Permissions Role</label>
-          <select value={role} onChange={e => setRole(e.target.value)} style={{ width: "100%", padding: 12, borderRadius: 10, border: "1.5px solid var(--color-border)", background: "#FFF" }}>
-            <option value="user">User (Staff / Billing Only)</option>
-            <option value="superadmin">Super Admin (Full CRUD and Ledger Management)</option>
+          <select value={roleId} onChange={e => setRoleId(e.target.value)} style={{ width: "100%", padding: 12, borderRadius: 10, border: "1.5px solid var(--color-border)", background: "#FFF" }} required>
+            <option value="">Select a role</option>
+            {roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}
           </select>
 
           <button type="submit" style={S.primaryBtn} disabled={submitting}>
-            {submitting ? "Registering..." : "Register Staff User"}
+            {submitting ? "Saving..." : staff ? "Save Staff User" : "Register Staff User"}
           </button>
           <button type="button" style={S.ghostBtn} onClick={onClose}>Cancel</button>
         </form>
       </div>
     </div>
   );
+}
+
+function RoleFormSheet({ role, session, onClose, onSaved, showToast }) {
+  const [name, setName] = useState(role?.name || '');
+  const [description, setDescription] = useState(role?.description || '');
+  const [permissions, setPermissions] = useState(role?.permissions || {});
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async event => {
+    event.preventDefault();
+    if (!name.trim()) return showToast('Role name is required.');
+    setSubmitting(true);
+    try { await db.saveRole({ id: role?.id, name: name.trim(), description: description.trim(), permissions }, session.id); showToast(`Role ${role ? 'updated' : 'created'}: ${name}`); onSaved(); }
+    catch (error) { showToast('Role save failed: ' + error.message); }
+    finally { setSubmitting(false); }
+  };
+  return <div style={S.sheetOverlay} onClick={onClose} className="animate-fade-in"><div style={{ ...S.sheet, maxHeight: '92vh', overflowY: 'auto' }} onClick={event => event.stopPropagation()} className="animate-slide-up"><div style={S.sheetHandle} /><h3 style={S.sheetTitle}>{role ? 'Edit Role' : 'Create Role'}</h3><form onSubmit={submit}>
+    <label style={S.label}>Role name</label><input style={S.input} value={name} onChange={event => setName(event.target.value)} required />
+    <label style={S.label}>Description</label><textarea style={{ ...S.input, minHeight: 60 }} value={description} onChange={event => setDescription(event.target.value)} />
+    <h4 style={{ marginTop: 18, marginBottom: 8 }}>Permissions</h4>
+    <div style={{ display: 'grid', gap: 8 }}>{PERMISSIONS.map(([key, label]) => <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}><input type="checkbox" checked={!!permissions[key]} onChange={event => setPermissions(current => ({ ...current, [key]: event.target.checked }))} />{label}</label>)}</div>
+    <button type="submit" style={S.primaryBtn} disabled={submitting}>{submitting ? 'Saving...' : 'Save role'}</button><button type="button" style={S.ghostBtn} onClick={onClose}>Cancel</button>
+  </form></div></div>;
 }
 
 const COLORS = {
@@ -3808,7 +3718,6 @@ const S = {
   errorText: { color: COLORS.danger, fontSize: 13, marginTop: 10, marginBottom: 0, fontWeight: 500 },
   primaryBtn: { width: "100%", marginTop: 20, padding: "13px 16px", borderRadius: 10, border: "none", background: COLORS.teal, color: "#fff", fontWeight: 600, fontSize: 15, boxShadow: "0 4px 12px rgba(15, 110, 86, 0.2)" },
   fingerprintBtn: { width: "100%", marginTop: 12, padding: "12px 16px", borderRadius: 10, border: `1.5px solid ${COLORS.border}`, background: "transparent", color: COLORS.ink, fontWeight: 500, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 },
-  demoNote: { fontSize: 12.5, color: COLORS.inkSoft, marginTop: 20, textAlign: "center" },
   mockBanner: { width: "100%", padding: "10px", background: COLORS.amberBg, color: COLORS.amber, borderRadius: 10, fontSize: 12.5, textAlign: "center", fontWeight: 500, border: `1px solid rgba(186, 117, 23, 0.2)` },
 
   header: { background: COLORS.tealDark, padding: "1.25rem 0 0", boxShadow: "0 4px 20px rgba(0,0,0,0.08)" },

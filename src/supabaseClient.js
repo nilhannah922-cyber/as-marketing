@@ -1,20 +1,20 @@
 import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY
 
 // Check if credentials are placeholders or empty
 const isMock = !supabaseUrl || 
                supabaseUrl.includes('your-project-id') || 
                supabaseUrl === '' ||
-               !supabaseAnonKey || 
-               supabaseAnonKey.includes('your-anon-key-here') || 
-               supabaseAnonKey === '';
+               !supabasePublishableKey ||
+               supabasePublishableKey.includes('your-anon-key-here') ||
+               supabasePublishableKey === '';
 
 let supabase = null;
 if (!isMock) {
   try {
-    supabase = createClient(supabaseUrl, supabaseAnonKey);
+    supabase = createClient(supabaseUrl, supabasePublishableKey);
   } catch (err) {
     console.error("Failed to initialize Supabase client. Running in Mock Mode.", err);
   }

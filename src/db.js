@@ -1,4 +1,6 @@
 import { supabase, isMock } from './supabaseClient';
+import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
+import { ALL_PERMISSION_KEYS, DEFAULT_USER_PERMISSION_KEYS } from './permissions';
 
 const SEED_CATEGORIES = [
   { id: "c1", name: "Beverages", description: "Soft drinks, juices and water", image: "" },
@@ -46,11 +48,42 @@ const KEYS = {
   STOCK_BATCHES: 'so:stock_batches',
   WEBAUTHN: 'so:webauthn',
   AUDIT_LOGS: 'so:audit_logs'
+  ,ROLES: 'so:roles'
 };
 
+const MOCK_ROLES = [
+  { id: 'role_superadmin', name: 'Super admin', description: 'Protected full-access system role.', is_system_role: true, permissions: Object.fromEntries(ALL_PERMISSION_KEYS.map(key => [key, true])) },
+  { id: 'role_user', name: 'User', description: 'Protected standard operational user role.', is_system_role: true, permissions: Object.fromEntries(DEFAULT_USER_PERMISSION_KEYS.map(key => [key, true])) },
+];
+
+function normalizeProfile(profile) {
+  const roleRecord = profile?.assigned_role || profile?.role_record;
+  const permissionRows = roleRecord?.role_permissions || [];
+  const permissions = Object.fromEntries(permissionRows.filter(row => row.granted).map(row => [row.permission_key, true]));
+  return { ...profile, role_name: roleRecord?.name || (profile?.role === 'superadmin' ? 'Super admin' : 'User'), is_system_role: !!roleRecord?.is_system_role, permissions };
+}
+
+async function getFunctionError(data, error, fallback) {
+  if (data?.error) return data.error;
+  if (error?.context) {
+    try {
+      const body = await error.context.clone().json();
+      if (body?.error) return body.error;
+    } catch {
+      // Fall through to the SDK or fallback message.
+    }
+  }
+  return error?.message || fallback;
+}
+
 function initLocalStorage() {
+  if (!localStorage.getItem(KEYS.ROLES)) localStorage.setItem(KEYS.ROLES, JSON.stringify(MOCK_ROLES));
   if (!localStorage.getItem(KEYS.USERS)) {
-    localStorage.setItem(KEYS.USERS, JSON.stringify([SUPER_ADMIN_MOCK]));
+    localStorage.setItem(KEYS.USERS, JSON.stringify([{ ...SUPER_ADMIN_MOCK, role_id: 'role_superadmin', role_name: 'Super admin', permissions: MOCK_ROLES[0].permissions }]));
+  } else {
+    const users = JSON.parse(localStorage.getItem(KEYS.USERS) || '[]');
+    const migratedUsers = users.map(user => user.role_id ? user : { ...user, role_id: user.role === 'superadmin' ? 'role_superadmin' : 'role_user' });
+    localStorage.setItem(KEYS.USERS, JSON.stringify(migratedUsers));
   }
   if (!localStorage.getItem(KEYS.CATEGORIES)) {
     localStorage.setItem(KEYS.CATEGORIES, JSON.stringify(SEED_CATEGORIES));
@@ -162,6 +195,31 @@ async function logAudit(userId, action, targetTable, targetId) {
 }
 
 export const db = {
+  async isCurrentUserSuperAdmin(userId) {
+    if (isMock) {
+      const profile = await this.getCurrentProfile(userId);
+      return profile?.role_name === 'Super admin' && (profile?.role_id === 'role_superadmin' || profile?.role === 'superadmin');
+    }
+    const { data, error } = await supabase.rpc('is_super_admin', { check_user_id: userId });
+    if (error) throw error;
+    return data === true;
+  },
+
+  async getCurrentProfile(cachedUserId) {
+    if (isMock) {
+      const users = JSON.parse(localStorage.getItem(KEYS.USERS) || '[]');
+      const roles = JSON.parse(localStorage.getItem(KEYS.ROLES) || '[]');
+      const user = users.find(item => item.id === cachedUserId);
+      const role = roles.find(item => item.id === user?.role_id) || roles.find(item => item.name === (user?.role === 'superadmin' ? 'Super admin' : 'User'));
+      return user ? { ...user, role_id: role?.id, role_name: role?.name, permissions: role?.permissions || {} } : null;
+    }
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return null;
+    const { data, error } = await supabase.from('users').select('*, assigned_role:roles!users_role_id_fkey(id,name,is_system_role,role_permissions(permission_key,granted))').eq('id', auth.user.id).single();
+    if (error) throw error;
+    return normalizeProfile(data);
+  },
+
   // Login with Username/Mobile and Password
   async login(username, password) {
     if (isMock) {
@@ -171,7 +229,9 @@ export const db = {
         x.password === password
       );
       if (!u) throw new Error("Incorrect username/mobile or password.");
-      return u;
+      const roles = JSON.parse(localStorage.getItem(KEYS.ROLES) || '[]');
+      const role = roles.find(r => r.id === u.role_id) || roles.find(r => r.name === (u.role === 'superadmin' ? 'Super admin' : 'User'));
+      return { ...u, role_id: role?.id, role_name: role?.name, permissions: role?.permissions || {} };
     } else {
       const { data: profile, error: pError } = await supabase
         .from('users')
@@ -192,12 +252,12 @@ export const db = {
 
       const { data: userProfile, error: profileErr } = await supabase
         .from('users')
-        .select('*')
+        .select('*, assigned_role:roles!users_role_id_fkey(id,name,is_system_role,role_permissions(permission_key,granted))')
         .eq('id', data.user.id)
         .single();
 
       if (profileErr) throw new Error("Profile retrieval failed: " + profileErr.message);
-      return userProfile;
+      return normalizeProfile(userProfile);
     }
   },
 
@@ -979,86 +1039,49 @@ export const db = {
     return { success: true };
   },
 
-  // WEBAUTHN DEVICE-NATIVE BIOMETRICS STUB
+  // WEBAUTHN DEVICE-NATIVE BIOMETRICS
 
   isWebAuthnSupported() {
-    return !!(window.PublicKeyCredential && 
-              navigator.credentials && 
-              navigator.credentials.create);
+    return !!(window.isSecureContext &&
+              window.PublicKeyCredential &&
+              navigator.credentials &&
+              navigator.credentials.create &&
+              navigator.credentials.get);
   },
 
-  async registerBiometric(userProfile) {
+  async registerBiometric() {
     if (!this.isWebAuthnSupported()) {
       throw new Error("Biometric sign-in (WebAuthn) is not supported by your browser or requires a secure context (HTTPS/localhost).");
     }
 
+    if (isMock) {
+      throw new Error("Secure fingerprint login requires Supabase and cannot be enabled in local mock mode.");
+    }
+
     try {
-      const challenge = new Uint8Array(32);
-      window.crypto.getRandomValues(challenge);
-      
-      const userIdBytes = new TextEncoder().encode(userProfile.id);
-
-      const publicKeyCredentialCreationOptions = {
-        challenge: challenge,
-        rp: {
-          name: "Stock & Order Management App",
-          id: window.location.hostname
-        },
-        user: {
-          id: userIdBytes,
-          name: userProfile.email || userProfile.username,
-          displayName: userProfile.name
-        },
-        pubKeyCredParams: [{
-          type: "public-key",
-          alg: -7
-        }, {
-          type: "public-key",
-          alg: -257
-        }],
-        authenticatorSelection: {
-          authenticatorAttachment: "platform",
-          userVerification: "required"
-        },
-        timeout: 60000,
-        attestation: "none"
-      };
-
-      const credential = await navigator.credentials.create({
-        publicKey: publicKeyCredentialCreationOptions
+      const { data: begin, error: beginError } = await supabase.functions.invoke('webauthn', {
+        body: { action: 'registration-options' },
       });
+      if (beginError || begin?.error) throw new Error(await getFunctionError(begin, beginError, "Could not begin fingerprint registration."));
 
-      if (!credential) throw new Error("Biometric credential registration cancelled.");
-
-      const credentialId = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
-      const fakePublicKey = "pubkey_representation_" + Math.random().toString(36).slice(2, 9);
-
-      if (isMock) {
-        const credentials = JSON.parse(localStorage.getItem(KEYS.WEBAUTHN)) || [];
-        credentials.push({
-          id: credentialId,
-          user_id: userProfile.id,
-          public_key: fakePublicKey,
-          device_name: navigator.userAgent.slice(0, 50),
-          created_at: new Date().toISOString()
-        });
-        localStorage.setItem(KEYS.WEBAUTHN, JSON.stringify(credentials));
-      } else {
-        const { error } = await supabase
-          .from('webauthn_credentials')
-          .insert({
-            id: credentialId,
-            user_id: userProfile.id,
-            public_key: fakePublicKey,
-            device_name: navigator.userAgent.slice(0, 50)
-          });
-        if (error) throw new Error("Failed to register credential: " + error.message);
+      const credential = await startRegistration({ optionsJSON: begin.options });
+      const { data: result, error: verifyError } = await supabase.functions.invoke('webauthn', {
+        body: {
+          action: 'registration-verify',
+          ceremonyId: begin.ceremonyId,
+          credential,
+          deviceName: navigator.userAgent,
+        },
+      });
+      if (verifyError || result?.error || !result?.verified) {
+        throw new Error(await getFunctionError(result, verifyError, "The server could not verify this fingerprint credential."));
       }
 
-      localStorage.setItem('so:registered_credential_id', credentialId);
-      return { success: true, credentialId };
+      localStorage.setItem('so:registered_credential_id', result.credentialId);
+      return { success: true, credentialId: result.credentialId };
     } catch (err) {
       console.error("WebAuthn register error:", err);
+      if (err?.name === 'NotAllowedError') throw new Error("Fingerprint registration was cancelled or timed out.");
       throw new Error(err.message || "Failed to set up fingerprint biometric login.");
     }
   },
@@ -1073,59 +1096,39 @@ export const db = {
       throw new Error("No fingerprint login is registered on this device. Please log in with password first.");
     }
 
+    if (isMock) {
+      throw new Error("Secure fingerprint login requires Supabase. Sign in with your password while local mock mode is active.");
+    }
+
     try {
-      const challenge = new Uint8Array(32);
-      window.crypto.getRandomValues(challenge);
-
-      const rawIdBytes = Uint8Array.from(atob(registeredCredId), c => c.charCodeAt(0));
-
-      const publicKeyCredentialRequestOptions = {
-        challenge: challenge,
-        allowCredentials: [{
-          id: rawIdBytes,
-          type: 'public-key'
-        }],
-        timeout: 60000,
-        userVerification: "required"
-      };
-
-      const assertion = await navigator.credentials.get({
-        publicKey: publicKeyCredentialRequestOptions
+      const { data: begin, error: beginError } = await supabase.functions.invoke('webauthn', {
+        body: { action: 'authentication-options', credentialId: registeredCredId },
       });
+      if (beginError || begin?.error) throw new Error(await getFunctionError(begin, beginError, "Could not begin fingerprint authentication."));
 
-      if (!assertion) throw new Error("Biometric authentication cancelled.");
-
-      if (isMock) {
-        const credentials = JSON.parse(localStorage.getItem(KEYS.WEBAUTHN)) || [];
-        const binding = credentials.find(c => c.id === registeredCredId);
-        if (!binding) throw new Error("Biometric registration is invalid.");
-
-        const users = JSON.parse(localStorage.getItem(KEYS.USERS));
-        const user = users.find(u => u.id === binding.user_id);
-        if (!user) throw new Error("Associated user not found.");
-
-        return user;
-      } else {
-        const { data: cred, error: credErr } = await supabase
-          .from('webauthn_credentials')
-          .select('user_id')
-          .eq('id', registeredCredId)
-          .maybeSingle();
-
-        if (credErr || !cred) throw new Error("Credential not found on server.");
-
-        const { data: userProfile, error: profileErr } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', cred.user_id)
-          .single();
-
-        if (profileErr) throw new Error("Failed to load profile: " + profileErr.message);
-        
-        return userProfile;
+      const credential = await startAuthentication({ optionsJSON: begin.options });
+      const { data: result, error: verifyError } = await supabase.functions.invoke('webauthn', {
+        body: { action: 'authentication-verify', ceremonyId: begin.ceremonyId, credential },
+      });
+      if (verifyError || result?.error || !result?.verified || !result?.tokenHash) {
+        throw new Error(await getFunctionError(result, verifyError, "The server rejected this fingerprint authentication."));
       }
+
+      const { error: sessionError } = await supabase.auth.verifyOtp({
+        token_hash: result.tokenHash,
+        type: 'magiclink',
+      });
+      if (sessionError) throw new Error("Fingerprint was verified, but an authenticated session could not be created: " + sessionError.message);
+
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user) throw new Error("The authenticated account could not be loaded.");
+      const { data: userProfile, error: profileError } = await supabase
+        .from('users').select('*, assigned_role:roles!users_role_id_fkey(id,name,is_system_role,role_permissions(permission_key,granted))').eq('id', authData.user.id).single();
+      if (profileError) throw new Error("Failed to load profile: " + profileError.message);
+      return normalizeProfile(userProfile);
     } catch (err) {
       console.error("WebAuthn verification error:", err);
+      if (err?.name === 'NotAllowedError') throw new Error("Fingerprint authentication was cancelled, timed out, or not recognized.");
       throw new Error(err.message || "Fingerprint recognition failed.");
     }
   },
@@ -1507,7 +1510,7 @@ export const db = {
   },
 
   // Create Staff User
-  async createStaffUser(name, mobile, email, password, role, creatorUserId) {
+  async createStaffUser(name, mobile, email, password, roleId, creatorUserId) {
     if (isMock) {
       const users = JSON.parse(localStorage.getItem(KEYS.USERS)) || [];
       const exists = users.some(u => u.username === email || u.email === email || u.mobile === mobile);
@@ -1520,33 +1523,101 @@ export const db = {
         mobile,
         email,
         password,
-        role,
+        role_id: roleId,
+        role: roleId === 'role_superadmin' ? 'superadmin' : 'user',
         must_change_password: true,
         created_at: new Date().toISOString()
       };
       users.push(newStaff);
       localStorage.setItem(KEYS.USERS, JSON.stringify(users));
-      await logAudit(creatorUserId, `Registered staff account: ${name} (${role})`, 'users', newStaff.id);
+      await logAudit(creatorUserId, `Registered staff account: ${name}`, 'users', newStaff.id);
       return newStaff;
     } else {
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            name,
-            mobile,
-            role,
-            must_change_password: true
-          }
-        }
+      const { data, error } = await supabase.functions.invoke('admin-users', {
+        body: { action: 'create', name, mobile, email, password, roleId },
       });
-      if (error) throw error;
-      
-      const staffId = data.user.id;
-      await logAudit(creatorUserId, `Registered staff account: ${name} (${role})`, 'users', staffId);
+      if (error || data?.error) throw new Error(await getFunctionError(data, error, 'Staff creation failed.'));
+      await logAudit(creatorUserId, `Registered staff account: ${name}`, 'users', data.user.id);
       return data.user;
     }
+  },
+
+  async updateStaffUser(userId, values, actorId) {
+    if (isMock) {
+      const users = JSON.parse(localStorage.getItem(KEYS.USERS) || '[]');
+      const next = users.map(user => user.id === userId ? { ...user, ...values } : user);
+      localStorage.setItem(KEYS.USERS, JSON.stringify(next));
+      await logAudit(actorId, `Updated staff account: ${values.name}`, 'users', userId);
+      return next.find(user => user.id === userId);
+    }
+    const { data, error } = await supabase.functions.invoke('admin-users', { body: { action: 'update', userId, ...values } });
+    if (error || data?.error) throw new Error(await getFunctionError(data, error, 'Staff update failed.'));
+    return data.user;
+  },
+
+  async deleteStaffUser(userId) {
+    if (isMock) {
+      const users = JSON.parse(localStorage.getItem(KEYS.USERS) || '[]');
+      localStorage.setItem(KEYS.USERS, JSON.stringify(users.filter(user => user.id !== userId)));
+      return { success: true };
+    }
+    const { data, error } = await supabase.functions.invoke('admin-users', { body: { action: 'delete', userId } });
+    if (error || data?.error) throw new Error(await getFunctionError(data, error, 'Staff deletion failed.'));
+    return data;
+  },
+
+  async fetchRoles() {
+    if (isMock) {
+      const roles = JSON.parse(localStorage.getItem(KEYS.ROLES) || '[]');
+      const users = JSON.parse(localStorage.getItem(KEYS.USERS) || '[]');
+      return roles.map(role => ({ ...role, staff: users.filter(user => user.role_id === role.id) }));
+    }
+    const { data, error } = await supabase.from('roles').select('*, role_permissions(permission_key,granted), staff:users(id,name,email)').order('name');
+    if (error) throw error;
+    return (data || []).map(role => ({ ...role, permissions: Object.fromEntries((role.role_permissions || []).filter(p => p.granted).map(p => [p.permission_key, true])) }));
+  },
+
+  async saveRole(values, actorId) {
+    if (isMock) {
+      const roles = JSON.parse(localStorage.getItem(KEYS.ROLES) || '[]');
+      if (values.id) {
+        const existing = roles.find(role => role.id === values.id);
+        if (existing?.is_system_role) throw new Error('System roles cannot be edited.');
+        Object.assign(existing, values);
+      } else {
+        if (roles.some(role => role.name.toLowerCase() === values.name.toLowerCase())) throw new Error('A role with this name already exists.');
+        roles.push({ ...values, id: uid('role'), is_system_role: false, created_by: actorId, created_at: new Date().toISOString() });
+      }
+      localStorage.setItem(KEYS.ROLES, JSON.stringify(roles));
+      return { success: true };
+    }
+    let roleId = values.id;
+    if (roleId) {
+      const { error } = await supabase.from('roles').update({ name: values.name, description: values.description }).eq('id', roleId);
+      if (error) throw error;
+      const { error: deleteError } = await supabase.from('role_permissions').delete().eq('role_id', roleId);
+      if (deleteError) throw deleteError;
+    } else {
+      const { data, error } = await supabase.from('roles').insert({ name: values.name, description: values.description, created_by: actorId }).select('id').single();
+      if (error) throw error;
+      roleId = data.id;
+    }
+    const rows = Object.entries(values.permissions).filter(([, granted]) => granted).map(([permission_key]) => ({ role_id: roleId, permission_key, granted: true }));
+    if (rows.length) { const { error } = await supabase.from('role_permissions').insert(rows); if (error) throw error; }
+    return { success: true, id: roleId };
+  },
+
+  async deleteRole(role) {
+    if (role.is_system_role) throw new Error('System roles cannot be deleted.');
+    if (role.staff?.length) throw new Error(`Reassign these staff first: ${role.staff.map(user => user.name || user.email).join(', ')}`);
+    if (isMock) {
+      const roles = JSON.parse(localStorage.getItem(KEYS.ROLES) || '[]');
+      localStorage.setItem(KEYS.ROLES, JSON.stringify(roles.filter(item => item.id !== role.id)));
+      return { success: true };
+    }
+    const { error } = await supabase.from('roles').delete().eq('id', role.id);
+    if (error) throw error;
+    return { success: true };
   },
 
   // Fetch Audit Logs
@@ -1806,10 +1877,10 @@ export const db = {
     } else {
       const { data, error } = await supabase
         .from('users')
-        .select('*')
+        .select('*, assigned_role:roles!users_role_id_fkey(id,name)')
         .order('name');
       if (error) throw error;
-      return data;
+      return (data || []).map(user => ({ ...user, role_name: user.assigned_role?.name || user.role }));
     }
   },
 

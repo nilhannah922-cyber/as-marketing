@@ -84,7 +84,7 @@ Don't paste this and say "build everything." Follow the phased instructions at t
 ### Manage
 - **Customers:** list + search, add/edit customer (name, company, address, mobile, email, NIC, bank details, notes), customer detail shows orders + ledger + outstanding balance
 - **Products:** categories grid → add/edit/delete category; products grid per category → add/edit/delete product, barcode scan/search, image upload, restock action, recycle bin
-- **Admin panel** (super admin only, re-auth required): add/edit/delete users with role assignment, permissions
+- **Permissions section** (Super admin only): staff users, custom roles, permission assignment, and audit logs; hidden from every other role
 
 ### Settings
 - Theme (light/dark), currency, backup/restore, about, logout
@@ -103,6 +103,59 @@ Don't paste this and say "build everything." Follow the phased instructions at t
 - Global search covers products, customers, orders, and categories
 
 ## Feature additions
+
+### Custom roles and granular permission management
+
+The fixed User/Super-admin UI has been replaced by database-defined roles. The implementation uses normalized `roles` and `role_permissions` tables (rather than a JSON column) so permissions can be indexed, queried, protected with RLS, joined to staff counts, and extended without rewriting an entire role document. `users.role_id` references `roles`; the legacy `users.role` text remains temporarily for migration/backward compatibility.
+
+After all existing schema/feature migrations have been applied, running `roles_permissions_migration.sql` creates the model, migrates every existing `superadmin` user to **Super admin** and every existing `user` to **User**, and seeds both as protected `is_system_role` roles. The migration includes assertions that every legacy superadmin—including the default account—maps to the protected Super admin role and that this role has every catalog permission. Super admin and User can never be renamed, edited, or deleted, and database triggers reject direct attempts to change their permission rows. Custom roles cannot be deleted while staff are assigned.
+
+The complete permission catalog is:
+
+- `view_dashboard` — view dashboard and summary
+- `create_orders` — create orders
+- `edit_orders` — edit quantities and line items
+- `delete_orders` — soft-delete orders
+- `advance_order_status` — advance packing and delivery status (additional gate found in the existing app)
+- `record_payments` — record order/customer payments
+- `process_returns` — process returns, refunds, and credits
+- `view_all_orders` — view all staff orders rather than only the current user's orders
+- `manage_products` — create, edit, and delete products
+- `manage_categories` — create, edit, and delete categories
+- `manage_customers` — create, edit, and delete customers
+- `manage_stock` — restock, bulk-update, and create stock entries
+- `manage_suppliers` — manage suppliers, purchase orders, and receiving
+- `view_reports` — view reports
+- `export_reports` — export/print report data
+- `restore_deleted_records` — restore recycle-bin records (additional gate found in the existing app)
+- `permanently_delete_records` — permanently delete recycle-bin records
+- `backup_restore` — export and restore database backups
+
+The main navigation has a dedicated **Permissions** item next to Manage. It is shown only when the signed-in account belongs to the protected Super admin system role and is guarded again at route/render level. Opening it does not display an additional password popup; the existing authenticated session determines visibility. Its tabs are **Staff users**, **Roles**, and **Audit logs**. Staff users and Audit logs previously lived as tabs inside **Manage → Management Console**; they were removed from that navigation and relocated here rather than exposed in both places. The Roles tab is also located here. Staff create/edit forms query `roles`, so newly created custom roles appear automatically.
+
+Managing staff, deleting staff, managing roles/permissions, and viewing audit logs are deliberately **not permission keys and do not appear as checkboxes**. They can never be delegated to a custom role. The frontend checks the protected Super admin identity, `public.is_super_admin()` enforces the same rule in RLS, and the `admin-users` Edge Function independently performs the same database check before any Auth Admin operation.
+
+**Enforcement is database-level, not UI-only.** `public.has_permission(auth.uid(), permission_key)` resolves operational grants, while `public.is_super_admin(auth.uid())` exclusively protects users, role mutations, permission mutations, and audit-log access. `roles_permissions_migration.sql` replaces legacy RLS policies across users, roles, inventory, customers, orders, payments, returns, stock, suppliers, recycle-bin data, and audit logs. Column-protection triggers prevent narrow permissions from changing unrelated fields. Permission-checking wrappers protect security-definer payment, return, and FIFO functions. Direct API requests remain subject to RLS, triggers, and function guards even when frontend controls are bypassed.
+
+Deploy `supabase/functions/admin-users` after running the migration. The function must retain JWT verification and validates the caller with `is_super_admin()` before performing any Auth Admin operation; the service-role key is never exposed to the browser.
+
+### Login credential removal and real biometric authentication
+
+- **No credentials in the UI:** The login screen no longer renders the demo/seed administrator username or password, and its username placeholder does not reveal a seeded username. Developers who need the local mock credentials for testing can find them in the **Roles** section of this README; they must never be displayed by the application.
+- **Registration:** After a successful password login, a user can open **Settings → Biometric authentication** and register the current device. The browser invokes the native WebAuthn platform authenticator through `navigator.credentials.create()` (via SimpleWebAuthn), while the `webauthn` Supabase Edge Function creates the challenge and verifies the attestation. Only the verified credential public key, transports, device metadata, and signature counter are stored in `webauthn_credentials`; the private key never leaves the authenticator.
+- **Login:** The fingerprint button is enabled only when this browser has a registered credential ID. Login invokes `navigator.credentials.get()` and the native OS/browser verification prompt. The Edge Function consumes a one-time challenge, cryptographically verifies the assertion against the stored public key and RP origin, updates the signature counter, and only then issues a Supabase Auth session. Cancellation, timeout, unsupported devices, missing registration, and failed server verification produce honest errors and never create a local session.
+- **No mock fallback:** Passwordless biometric authentication is disabled in local mock database mode because client-only verification would not be secure.
+- **Secure-context requirement:** WebAuthn works on HTTPS origins and on the special `localhost` development origin. Plain HTTP served from a LAN address such as `http://192.168.x.x` is not a secure context and may not expose WebAuthn. Test the final flow on the deployed HTTPS domain.
+
+Production setup requires running `webauthn_migration.sql`, deploying `supabase/functions/webauthn` with unauthenticated gateway access (the function validates authenticated registration actions itself), and configuring these Edge Function secrets:
+
+```text
+WEBAUTHN_RP_ID=your-domain.example
+WEBAUTHN_ORIGINS=https://your-domain.example
+WEBAUTHN_RP_NAME=AS Marketing Stock & Order
+```
+
+For multiple approved deployments, `WEBAUTHN_ORIGINS` accepts a comma-separated list of exact origins. The RP ID must be the deployed hostname (or a registrable parent domain) and must not include a scheme or path. A typical deployment command is `supabase functions deploy webauthn --no-verify-jwt`; never expose `SUPABASE_SERVICE_ROLE_KEY` to the Vite frontend or Vercel environment.
 
 ### Typeable quantity inputs on order line items
 
@@ -251,7 +304,7 @@ Test it yourself: log in, add to cart, confirm an order, check Supabase to see t
 Test: create an order from Phase 1, then find and edit it here; confirm stock and customer balance update correctly.
 
 **Step 3 — Phase 3**
-> "Now build the Manage section: customers (list, add/edit, ledger view), products/categories (add/edit/delete, barcode scan, image upload, restock), and the admin panel (add/edit/delete users with role assignment, re-auth required to enter)."
+> "Now build the Manage section: customers (list, add/edit, ledger view), products/categories (add/edit/delete, barcode scan, image upload, restock), plus a Super-admin-only Permissions section for staff, roles, and audit logs."
 Test: add a real product, add a real customer, create a new user with each role, confirm permissions actually differ.
 
 **Step 4 — Phase 4**
